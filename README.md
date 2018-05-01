@@ -15,6 +15,8 @@ Then install the local dependencies
 $ npm install
 ```
 
+Requires a local mongodb instance up and running on port 27017 with a "delaydb" table.
+
 ## Dev build + livereload webserver
 ```bash
 $ npm start
