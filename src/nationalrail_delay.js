@@ -6,11 +6,22 @@ const Joi = require('joi');
 const soap = require('soap');
 
 const creds = require('./creds');
+let AWS = require('aws-sdk');
+let table = 'delays';
 
+/*
 let database;
 let MongoClient = require('mongodb').MongoClient;
 let ObjectID = require('mongodb').ObjectID;
 let url = 'mongodb://localhost:27017/';
+*/
+
+AWS.config.update({
+  region: 'eu-west-2',
+  endpoint: 'http://localhost:8000'
+});
+let dbClient = new AWS.DynamoDB();
+
 
 /*let crsDB = {
   PTR: 'Petersfield',
@@ -52,7 +63,7 @@ const DelaySchema = Joi.object({
   delayInSeconds: '65',
   delayDate: '2018-02-03',
 };*/
-
+/*
 MongoClient.connect(url, (err, db) => {
   if (err) throw err;
   database = db.db('delaydb');
@@ -61,24 +72,7 @@ MongoClient.connect(url, (err, db) => {
     console.log('Collection created!');
   });
 });
-
-/*
-let wsdlOptions = {
-    ignoredNamespaces: {
-    namespaces: ['targetNamespace', 'typedNamespace'],
-    override: true
-  },
- overrideRootElement: {
-    namespace: 'tns',
-    xmlnsAttributes: [{
-      name: 'xmlns:ns1',
-      value: 'http://thalesgroup.com/RTTI/2014-02-20/ldb/'
-    }, {
-      name: 'xmlns:ns2',
-      value: 'http://thalesgroup.com/RTTI/2010-11-01/ldb/commontypes'
-    }]
-  }
-};*/
+*/
 
 let wsdl = 'https://lite.realtime.nationalrail.co.uk/OpenLDBWS/wsdl.aspx?ver=2017-10-01';
 
@@ -128,9 +122,7 @@ function monitorDepartures(fromStation, toStation) {
             trainId: result.GetStationBoardResult.trainServices.service[i].rsid,
             delayDate: String(result.GetStationBoardResult.generatedAt).slice(0, 10),
           };
-
-          insertDeparture(serviceDetails, (err, result) => {
-          });
+          insertDeparture(serviceDetails);
         }
       }
     });
@@ -183,32 +175,43 @@ function monitorArrivals(fromStation, toStation) {
             delayDate: String(result.GetStationBoardResult.generatedAt).slice(0, 10),
           };
 
-          insertArrival(serviceDetails, (err, result) => {
-          });
+          insertArrival(serviceDetails);
         }
       }
     });
   });
 }
 
-setInterval( () => { monitorArrivals('PTR', 'WAT'); monitorDepartures('PTR', 'WAT'); }, 60000 );
+//setInterval( () => { monitorArrivals('PTR', 'WAT'); monitorDepartures('PTR', 'WAT'); }, 60000 );
 
 function findDelay(delayDetails, callBack) {
   console.log('findDelay');
 
-  database.collection('delays').findOne({ 'departureDetails.scheduledTimestamp': new Date( delayDetails.departureDetails.scheduledTimestamp ) }, (err, results) => {
-    if (err) {
-      console.log('Error findOne');
-      callBack({ ErrorMsg: 'Something bad happened' });
+  let dbQueryParams = {
+    ':scheduledTimestamp': delayDetails.departureDetails.scheduledTimestamp
+  };
+
+  let marshalledQueryParams = AWS.DynamoDB.Converter.marshall(dbQueryParams);
+
+  let paramsQuery = {
+    TableName: table,
+    ExpressionAttributeValues: marshalledQueryParams,
+    FilterExpression: 'departureDetails.scheduledTimestamp >= :scheduledTimestamp',
+    ProjectionExpression: 'arrivalDetails, departureDetails, delayInSeconds, trainId, delayDate'
+  };
+
+  let promiseQuery = dbClient.scan(paramsQuery).promise();
+
+  promiseQuery.then((data) => {
+    if (data.Count !== 0) {
+      callBack(data.Items);
     } else {
-      console.log(results);
-      if (results) {
-        callBack(results);
-      } else {
-        console.log('Not found');
-        callBack({ ErrorMsg: 'Could not find it' });
-      }
+      console.log('Not found');
+      callBack({ ErrorMsg: 'Could not find it' });
     }
+  }).catch((data) => {
+    console.log('Error findOne');
+    callBack({ ErrorMsg: 'Something bad happened' });
   });
 };
 
@@ -235,41 +238,50 @@ function insertArrival(delayDetails, callBack) {
 
   localDelayDetails.delayInSeconds = diffSecs;
 
-  database.collection('delays').findOne({ trainId: localDelayDetails.trainId, delayDate: localDelayDetails.delayDate }, (err, results) => {
-    if (err) {
-      console.log('Error: ', err);
-      return callBack(-1);
+  let dbQueryParams = {
+    ':t': delayDetails.trainId,
+    ':d': 'localDelayDetails.delayDate',
+  };
+
+  let marshalledQueryParams = AWS.DynamoDB.Converter.marshall(dbQueryParams);
+
+  let paramsQuery = {
+    TableName: table,
+    ExpressionAttributeValues: marshalledQueryParams,
+    KeyConditionExpression: 'delayDate = :d and trainId = :t',
+    ProjectionExpression: 'arrivalDetails, departureDetails, delayInSeconds, trainId, delayDate'
+  };
+
+  let promiseQuery = dbClient.query(paramsQuery).promise();
+  promiseQuery.then((data) => {
+    let marshalledAddDelay = AWS.DynamoDB.Converter.marshall(localDelayDetails);
+    let paramsAdd = {
+      TableName: table,
+      Item: marshalledAddDelay
+    };
+
+    if (data.Count !== 0) {
+      let promiseAdd = dbClient.putItem(paramsAdd).promise();
+      promiseAdd.then((data) => {
+        console.log('PutItem succeeded:', data);
+      }).catch((err) => {
+        console.error('Unable to putItem. Error JSON:', err);
+      });
     } else {
-      if (!results) {
-        console.log('ARRIVAL Adding to DB: ', localDelayDetails.trainId);
-        database.collection('delays').save(localDelayDetails, async (err, results) => {
-          if (err) {
-            console.log('Error: ', err);
-            return callBack(-1);
-          }
-
-          return callBack(1);
-        });
-      } else {
-        console.log('ARRIVAL Already present in DB Updating: ', localDelayDetails.trainId);
-        console.log(results);
-
-        database.collection('delays').updateOne({ trainId: localDelayDetails.trainId, delayDate: localDelayDetails.delayDate }, { $set: localDelayDetails }, (err, results) => {
-          if (err) {
-            console.log('Error: ', err);
-            return callBack(-1);
-          }
-
-          return callBack(0);
-        });
-      }
+      let promiseAdd = dbClient.update(paramsAdd).promise();
+      promiseAdd.then((data) => {
+        console.log('Update succeeded:', data);
+      }).catch((err) => {
+        console.error('Unable to putItem. Error JSON:', err);
+      });
     }
-  }
-  );
+  }).catch((err) => {
+    console.error('Unable to read item. Error JSON:', err);
+  });
 }
 
 
-function insertDelay(delayDetails, callBack) {
+function insertDelay(delayDetails) {
   console.log('insertDelay');
 
   let localDelayDetails = {
@@ -289,40 +301,58 @@ function insertDelay(delayDetails, callBack) {
     delayDate: delayDetails.delayDate,
   };
 
-  database.collection('delays').findOne({ trainId: localDelayDetails.trainId, delayDate: localDelayDetails.delayDate }, (err, results) => {
-    if (err) {
-      console.log('Error: ', err);
-      return callBack(-1);
+  let dbQueryParams = {
+    ':t': delayDetails.trainId,
+    ':d': localDelayDetails.delayDate,
+  };
+
+  let marshalledQueryParams = AWS.DynamoDB.Converter.marshall(dbQueryParams);
+
+  let paramsQuery = {
+    TableName: table,
+    ExpressionAttributeValues: marshalledQueryParams,
+    KeyConditionExpression: 'delayDate = :d and trainId = :t',
+    ProjectionExpression: 'arrivalDetails, departureDetails, delayInSeconds, trainId, delayDate'
+  };
+
+  let promiseQuery = dbClient.query(paramsQuery).promise();
+
+  return promiseQuery.then((data) => {
+    let marshalledAddDelay = AWS.DynamoDB.Converter.marshall(localDelayDetails);
+    let paramsAdd = {
+      TableName: 'delays',
+      Item: marshalledAddDelay
+    };
+
+    console.log('paramsAdd: ', paramsAdd);
+    console.log('data.Count: ', data.Count);
+    if (data.Count === 0) {
+      let promiseAdd = dbClient.putItem(paramsAdd).promise();
+      return promiseAdd.then((data) => {
+        console.log('PutItem succeeded:', data);
+        return 201;
+      }).catch((err) => {
+        console.error('Unable to putItem. Error JSON:', err);
+        return 500;
+      });
     } else {
-      if (!results) {
-        console.log('Adding to DB: ', localDelayDetails.trainId);
-        database.collection('delays').save(localDelayDetails, async (err, results) => {
-          if (err) {
-            console.log('Error: ', err);
-            return callBack(-1);
-          }
-
-          return callBack(1);
-        });
-      } else {
-        console.log('Already present in DB Updating: ', localDelayDetails.trainId);
-        console.log(localDelayDetails);
-        database.collection('delays').updateOne({ trainId: localDelayDetails.trainId, delayDate: localDelayDetails.delayDate }, { $set: localDelayDetails }, (err, results) => {
-          if (err) {
-            console.log('Error: ', err);
-            return callBack(-1);
-          }
-
-          return callBack(0);
-        });
-      }
+      // NEED to add in key for the update
+      let promiseUpdate = dbClient.updateItem(paramsAdd).promise();
+      return promiseUpdate.then((data) => {
+        console.log('Update succeeded:', data);
+        return 200;
+      }).catch((err) => {
+        console.error('Unable to update. Error JSON:', err);
+        return 500;
+      });
     }
-  }
-  );
-}
+  }).catch((err) => {
+    console.error('Unable to read item. Error JSON:', err);
+    return 500;
+  });
+};
 
-
-function insertDeparture(delayDetails, callBack) {
+function insertDeparture(delayDetails) {
   console.log('insertDeparture');
 
   let localDelayDetails = {
@@ -336,36 +366,46 @@ function insertDeparture(delayDetails, callBack) {
     delayDate: delayDetails.delayDate,
   };
 
-  database.collection('delays').findOne({ trainId: localDelayDetails.trainId, delayDate: localDelayDetails.delayDate }, (err, results) => {
-    if (err) {
-      console.log('Error: ', err);
-      return callBack(-1);
+  let dbQueryParams = {
+    ':t': delayDetails.trainId,
+    ':d': 'localDelayDetails.delayDate',
+  };
+
+  let marshalledQueryParams = AWS.DynamoDB.Converter.marshall(dbQueryParams);
+
+  let paramsQuery = {
+    TableName: table,
+    ExpressionAttributeValues: marshalledQueryParams,
+    KeyConditionExpression: 'delayDate = :d and trainId = :t',
+    ProjectionExpression: 'arrivalDetails, departureDetails, delayInSeconds, trainId, delayDate'
+  };
+
+  let promiseQuery = dbClient.query(paramsQuery).promise();
+  promiseQuery.then((data) => {
+    let marshalledAddDelay = AWS.DynamoDB.Converter.marshall(localDelayDetails);
+    let paramsAdd = {
+      TableName: 'delays',
+      Item: marshalledAddDelay
+    };
+
+    if (data.Count !== 0) {
+      let promiseAdd = dbClient.putItem(paramsAdd).promise();
+      promiseAdd.then((err, data) => {
+        console.log('PutItem succeeded:', data);
+      }).catch((err) => {
+        console.error('Unable to putItem. Error JSON:', err);
+      });
     } else {
-      //      console.log(results);
-      if (!results) {
-        console.log('DEPARTURE Adding to DB: ', localDelayDetails.trainId);
-        database.collection('delays').save(localDelayDetails, async (err, results) => {
-          if (err) {
-            console.log('Error: ', err);
-            return callBack(-1);
-          }
-
-          return callBack(1);
-        });
-      } else {
-        console.log('DEPARTURE Already present in DB Updating: ', localDelayDetails.trainId);
-        database.collection('delays').updateOne({ trainId: localDelayDetails.trainId, delayDate: localDelayDetails.delayDate }, { $set: localDelayDetails }, (err, results) => {
-          if (err) {
-            console.log('Error: ', err);
-            return callBack(-1);
-          }
-
-          return callBack(0);
-        });
-      }
+      let promiseAdd = dbClient.update(paramsAdd).promise();
+      promiseAdd.then((err, data) => {
+        console.log('Update succeeded:', data);
+      }).catch((err) => {
+        console.error('Unable to update. Error JSON:', err);
+      });
     }
-  }
-  );
+  }).catch((err) => {
+    console.error('Unable to read item. Error JSON: ', err);
+  });
 }
 
 
@@ -419,12 +459,12 @@ app.post('/delays', (req, res) => {
   if (ret.error) {
     res.status(400).end(ret.error.toString());
   } else {
-    insertDelay(req.body, (insertResult) => {
-      console.log('Here');
-      if (insertResult === 1) {
+    insertDelay(req.body).then((insertResult) => {
+      console.log('insertResult: ', insertResult);
+      if (insertResult === 201) {
         console.log('Returning 201');
         findDelay(req.body, (findResult) => {res.status(201).json(findResult); });
-      } else if (insertResult === 0) {
+      } else if (insertResult === 200) {
         console.log('Returning 200');
         res.status(200).json({ Msg: 'Already present in DB, updated.' });
       } else {
@@ -435,44 +475,68 @@ app.post('/delays', (req, res) => {
   }
 });
 
-app.delete('/delays/:id', (req, res) => {
+app.delete('/delays/:delayDate/:trainId', (req, res) => {
   console.log('DELETE request');
-  console.log(req.params.id);
 
-  database.collection('delays').remove({ _id: new ObjectID(req.params.id) }, (err, results) => {
-    if (err) {
-      console.log('Error: ', err);
-      res.status(500).json({ ErrorMsg: 'Something bad happend' });
-    } else {
-      if (results.result.n === 0) {
-        res.status(404).json({ ErrorMsg: "Couldn't find resource" });
-      } else {
-        console.log('Delete: Success');
-        console.log(results.result);
-        res.status(204);
-        res.send();
-      }
-    }
+  let paramsQuery = {
+    TableName: table,
+  };
+  let dbQueryParams = {
+    trainId: req.params.trainId,
+    delayDate: req.params.delayDate
+  };
+
+  let marshalledQueryParams = AWS.DynamoDB.Converter.marshall(dbQueryParams);
+  paramsQuery.Key = marshalledQueryParams;
+
+  let promiseQuery = dbClient.deleteItem(paramsQuery).promise();
+
+  promiseQuery.then((data) => {
+    console.log('GET: Success');
+    res.status(204).send();
+  }).catch((err) => {
+    console.log('Error: ', err);
+    res.status(404).json({ ErrorMsg: 'Something bad happend' });
   });
 });
 
 app.delete('/delays', (req, res) => {
   console.log('DELETE request');
 
-  database.collection('delays').remove({}, (err, results) => {
-    if (err) {
-      console.log('Error: ', err);
-      res.status(500).json({ ErrorMsg: 'Something bad happend' });
-    } else {
-      if (results.result.n === 0) {
-        res.status(404).json({ ErrorMsg: "Couldn't find resource" });
-      } else {
-        console.log('Delete: Success');
-        console.log(results.result);
-        res.status(204);
-        res.send();
+  let paramsQuery = {
+    TableName: table,
+  };
+
+  let promiseDelete = dbClient.deleteTable(paramsQuery).promise();
+
+  promiseDelete.then((data) => {
+    let params = {
+      TableName: table,
+      KeySchema: [
+        { AttributeName: 'delayDate', KeyType: 'HASH' },
+        { AttributeName: 'trainId', KeyType: 'RANGE' }
+      ],
+      AttributeDefinitions: [
+        { AttributeName: 'delayDate', AttributeType: 'S' },
+        { AttributeName: 'trainId', AttributeType: 'S' }
+      ],
+      ProvisionedThroughput: {
+        ReadCapacityUnits: 5,
+        WriteCapacityUnits: 5
       }
-    }
+    };
+    let promiseCreate = dbClient.createTable(params).promise();
+
+    promiseCreate.then((data) => {
+      console.log('DELETE: Success');
+      res.status(204).send();
+    }).catch((err) => {
+      console.log('Error: ', err);
+      res.status(404).json({ ErrorMsg: 'Something bad happend' });
+    });
+  }).catch((err) => {
+    console.log('Error: ', err);
+    res.status(404).json({ ErrorMsg: 'Something bad happend' });
   });
 });
 
@@ -480,20 +544,35 @@ app.delete('/delays', (req, res) => {
 app.get('/delays', (req, res) => {
   console.log('GET: /delays');
 
-  let queryArgs = {};
+  let paramsQuery = {
+    TableName: table
+  };
 
   if (req.query.delayed !== undefined) {
-    queryArgs.delayInSeconds = { gt: 0 };
+    let dbQueryParams = {
+      ':s': '0',
+    };
+    let marshalledQueryParams = AWS.DynamoDB.Converter.marshall(dbQueryParams);
+    paramsQuery.ExpressionAttributeValues = marshalledQueryParams;
+
+    if (req.query.delayed.trim() === 'true') {
+      paramsQuery.FilterExpression = 'delayInSeconds > :s';
+    } else {
+      paramsQuery.FilterExpression = 'delayInSeconds = :s';
+    }
   }
 
-  database.collection('delays').find(queryArgs).toArray((err, results) => {
-    if (err) {
-      console.log('Error: ', err);
-      res.status(404).json({ ErrorMsg: 'Something bad happend' });
-    } else {
-      console.log('GET: Success');
-      res.status(200).json(results);
-    }
+  let promiseQuery = dbClient.scan(paramsQuery).promise();
+
+  console.log('query string: ', req.query.delayed);
+  console.log('app.get /delays params: ', paramsQuery);
+  promiseQuery.then((data) => {
+    console.log('GET: Success');
+    console.log('GET: ', data);
+    res.status(200).json(processDBData(data));
+  }).catch((err) => {
+    console.log('Error: ', err);
+    res.status(404).json({ ErrorMsg: 'Something bad happend' });
   });
 });
 
@@ -507,27 +586,51 @@ app.get('/delays/:fromDate', (req, res) => {
 
   let toDate = new Date(fromDate.getFullYear() + 1, fromDateSplits[1] - 1, fromDateSplits[2]);
 
-  let queryArgs = {
-    'departureDetails.scheduledTimestamp': { $gte: fromDate, $lte: toDate }
+  let paramsQuery = {
+    TableName: table
+  };
+
+  let dbQueryParams = {
+    ':fromTimestamp': fromDate.toISOString(),
+    ':toTimestamp': toDate.toISOString()
   };
 
   if (req.query.delayed !== undefined) {
-    queryArgs.delayInSeconds = { gt: 0 };
+    dbQueryParams[':s'] = '0';
+
+    if (req.query.delayed.trim() === 'true') {
+      paramsQuery.FilterExpression = 'departureDetails.scheduledTimestamp > :fromTimestamp and departureDetails.scheduledTimestamp <= :toTimestamp and delayInSeconds > :s';
+    } else {
+      paramsQuery.FilterExpression = 'departureDetails.scheduledTimestamp > :fromTimestamp and departureDetails.scheduledTimestamp <= :toTimestamp and delayInSeconds = :s';
+    }
+  } else {
+    paramsQuery.FilterExpression = 'departureDetails.scheduledTimestamp > :fromTimestamp and departureDetails.scheduledTimestamp <= :toTimestamp';
   }
 
-  console.log(queryArgs);
+  let marshalledQueryParams = AWS.DynamoDB.Converter.marshall(dbQueryParams);
+  paramsQuery.ExpressionAttributeValues = marshalledQueryParams;
 
-  database.collection('delays').find(queryArgs).toArray((err, results) => {
-    if (err) {
-      console.log('Error: ', err);
-      res.status(500).json({ ErrorMsg: 'Something bad happend' });
-    } else {
-      console.log('Found: Success');
-      res.status(200).json(results);
-    }
+  console.log('app.get: ', paramsQuery);
+
+  let promiseQuery = dbClient.scan(paramsQuery).promise();
+
+  promiseQuery.then((data) => {
+    console.log('GET: Success');
+    console.log('GET: ', data.Items);
+    res.status(200).json(processDBData(data));
+  }).catch((err) => {
+    console.log('Error: ', err);
+    res.status(404).json({ ErrorMsg: 'Something bad happend' });
   });
 });
 
+function processDBData(data) {
+  let result = [];
+  for (let i = 0, len = data.Items.length; i < len; i++) {
+    result.push(AWS.DynamoDB.Converter.unmarshall(data.Items[i]));
+  }
+  return result;
+}
 
 app.get('/delays/:fromDate/:toDate', (req, res) => {
   console.log('GET fromDate toDate request');
@@ -540,24 +643,39 @@ app.get('/delays/:fromDate/:toDate', (req, res) => {
   let toDateSplits = req.params.toDate.split('-');
   let toDate = new Date(toDateSplits[0], toDateSplits[1] - 1, toDateSplits[2]);
 
-  let queryArgs = {
-    'departureDetails.scheduledTimestamp': { $gte: fromDate, $lte: toDate }
+  let paramsQuery = {
+    TableName: table
   };
 
-  if (req.query.delayed !== undefined) {
-    queryArgs.delayInSeconds = { gt: 0 };
+  let dbQueryParams = {
+    ':fromTimestamp': fromDate.toISOString(),
+    ':toTimestamp': toDate.toISOString()
+  };
+
+  if (req.query.delayed.trim() === 'true') {
+    dbQueryParams[':s'] = '0';
+
+    if (req.query.delayed === true) {
+      paramsQuery.FilterExpression = 'departureDetails.scheduledTimestamp > :fromTimestamp and departureDetails.scheduledTimestamp <= :toTimestamp and delayInSeconds > :s';
+    } else {
+      paramsQuery.FilterExpression = 'departureDetails.scheduledTimestamp > :fromTimestamp and departureDetails.scheduledTimestamp <= :toTimestamp and delayInSeconds = :s';
+    }
+  } else {
+    paramsQuery.FilterExpression = 'departureDetails.scheduledTimestamp > :fromTimestamp and departureDetails.scheduledTimestamp <= :toTimestamp';
   }
 
-  console.log(queryArgs);
+  let marshalledQueryParams = AWS.DynamoDB.Converter.marshall(dbQueryParams);
+  paramsQuery.ExpressionAttributeValues = marshalledQueryParams;
+  paramsQuery.FilterExpression = 'departureDetails.scheduledTimestamp > :fromTimestamp and departureDetails.scheduledTimestamp <= :toTimestamp';
 
-  database.collection('delays').find(queryArgs).toArray((err, results) => {
-    if (err) {
-      console.log('Error: ', err);
-      res.status(500).json({ ErrorMsg: 'Something bad happend' });
-    } else {
-      console.log('Found: Success');
-      res.status(200).json(results);
-    }
+  let promiseQuery = dbClient.scan(paramsQuery).promise();
+
+  promiseQuery.then((data) => {
+    console.log('GET: Success');
+    res.status(200).json(processDBData(data));
+  }).catch((err) => {
+    console.log('Error: ', err);
+    res.status(404).json({ ErrorMsg: 'Something bad happend' });
   });
 });
 
