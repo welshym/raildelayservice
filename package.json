@@ -10,7 +10,7 @@
     "build-prod": "webpack --config webpack.server.config.js $npm_package_entry --output $npm_package_output --mode production --progress --profile --colors"
   },
   "author": "",
-  "license": "ISC",
+  "license": "Mine",
   "dependencies": {
     "aws-sdk": "^2.243.1",
     "body-parser": "^1.18.2",

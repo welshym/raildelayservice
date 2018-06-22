@@ -10,7 +10,7 @@ module.exports = function (options) {
   options = options || {};
   const config = {
     // We build for node
-    target: "node",
+    target: 'node',
 
     // Node module dependencies should not be bundled
     externals: fs.readdirSync("node_modules")
@@ -26,11 +26,13 @@ module.exports = function (options) {
     // We are outputting a real node app!
     node: {
       console: false,
-      global: false,
-      process: false,
+      global: true,
+      process: true,
       Buffer: false,
-      __filename: false,
-      __dirname: false,
+      __filename: 'mock',
+      __dirname: 'mock',
+      Buffer: true,
+      setImmediate: true
     },
 
     resolve: {
@@ -68,19 +70,3 @@ module.exports = function (options) {
     
   return config;
 };
-
-/*, {
-          test: /\.(css|less)$/,
-          loader: 'style!css!less?strictMath'
-        }, {
-          test: /\.(png|jpg|woff2|woff|eot|ttf|svg)$/,
-          loader: 'file?name=assets/[name]-[hash].[ext]'
-        }, {
-          test: /\.jsx?$/,
-          exclude: /(node_modules|bower_components)/,
-          loader: 'eslint',
-          include: src
-        }, {
-          test: /\.json$/,
-          loader: 'json'
-        }*/

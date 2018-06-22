@@ -22,6 +22,23 @@ AWS.config.update({
 });
 let dbClient = new AWS.DynamoDB();
 
+let paramsQuery = {
+  TableName: table,
+};
+
+dbClient.describeTable(paramsQuery, (err, data) => {
+  if (err) {
+    console.log(err, err.stack); // an error occurred
+    process.exit(1);
+  } else {
+    console.log('Connected to the DynamoDB instance');
+    console.log(data);
+    console.log(data.Table.KeySchema);
+  }
+});
+
+/**********************************************************/
+let port = process.env.PORT || 3000;
 
 /*let crsDB = {
   PTR: 'Petersfield',
@@ -652,7 +669,7 @@ app.get('/delays/:fromDate/:toDate', (req, res) => {
     ':toTimestamp': toDate.toISOString()
   };
 
-  if (req.query.delayed.trim() === 'true') {
+  if (req.query.delayed !== undefined) {
     dbQueryParams[':s'] = '0';
 
     if (req.query.delayed === true) {
@@ -713,7 +730,7 @@ app.get('/trains/:from/:to', (req, res) => {
   res.status(200).json( {} );
 });
 
-app.listen(3000, () => {
-  console.log('listening on 3000');
+app.listen(port, () => {
+  console.log('listening on ', port);
 });
 
