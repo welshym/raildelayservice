@@ -64,3 +64,4 @@ typings/
 package-lock.json
 build/main.js
 build/*.js
+src/config.json
