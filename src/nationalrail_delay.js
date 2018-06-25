@@ -791,13 +791,12 @@ app.get('/trains/:from/:to', (req, res) => {
 });
 
 /**************************************************************************/
-AWS.config.update({
+/*AWS.config.update({
   region: 'eu-west-2',
   endpoint: 'http://localhost:8000'
-});
+});*/
 
-
-//AWS.config.loadFromPath('./src/config.json');
+AWS.config.loadFromPath('./src/config.json');
 
 let dbClient = new AWS.DynamoDB();
 
