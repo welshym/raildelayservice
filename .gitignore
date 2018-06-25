@@ -62,4 +62,4 @@ typings/
 
 # General stuff
 package-lock.json
-build/*
+build/*.js
