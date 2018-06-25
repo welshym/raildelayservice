@@ -9,36 +9,7 @@ const creds = require('./creds');
 let AWS = require('aws-sdk');
 let table = 'delays';
 
-/*
-let database;
-let MongoClient = require('mongodb').MongoClient;
-let ObjectID = require('mongodb').ObjectID;
-let url = 'mongodb://localhost:27017/';
-*/
-
-AWS.config.update({
-  region: 'eu-west-2',
-  endpoint: 'http://localhost:8000'
-});
-let dbClient = new AWS.DynamoDB();
-
-let paramsQuery = {
-  TableName: table,
-};
-
-dbClient.describeTable(paramsQuery, (err, data) => {
-  if (err) {
-    console.log(err, err.stack); // an error occurred
-    process.exit(1);
-  } else {
-    console.log('Connected to the DynamoDB instance');
-    console.log(data);
-    console.log(data.Table.KeySchema);
-  }
-});
-
 /**********************************************************/
-let port = process.env.PORT || 3000;
 
 /*let crsDB = {
   PTR: 'Petersfield',
@@ -133,10 +104,10 @@ function monitorDepartures(fromStation, toStation) {
             departureDetails: {
               crs: result.GetStationBoardResult.crs,
               fullName: result.GetStationBoardResult.locationName,
-              scheduledTimestamp: new Date(stdTimestamp),
-              actualTimestamp: new Date(etdTimestamp)
+              scheduledTimestamp: (new Date(stdTimestamp)).toISOString(),
+              actualTimestamp: (new Date(etdTimestamp)).toISOString()
             },
-            trainId: result.GetStationBoardResult.trainServices.service[i].rsid,
+            trainId: result.GetStationBoardResult.trainServices.service[i].serviceID,
             delayDate: String(result.GetStationBoardResult.generatedAt).slice(0, 10),
           };
           insertDeparture(serviceDetails);
@@ -164,9 +135,9 @@ function monitorArrivals(fromStation, toStation) {
   //    setInterval(soap.createClient, 60000, wsdl, function(err, client) {
     client.addSoapHeader(soapHeader);
     client.GetArrivalBoard(argsArrivals, (err, result) => {
-      console.log('result ', result);
-      console.log('result.GetStationBoardResult ', result.GetStationBoardResult);
-      console.log('last request: ', client.lastRequest);
+      //console.log('result ', result);
+      //console.log('result.GetStationBoardResult ', result.GetStationBoardResult);
+      //console.log('last request: ', client.lastRequest);
 
       if (result.GetStationBoardResult.trainServices !== undefined) {
         console.log('result.GetStationBoardResult.trainServices !== undefined ');
@@ -174,21 +145,23 @@ function monitorArrivals(fromStation, toStation) {
           let generatedDate = result.GetStationBoardResult.generatedAt.toISOString().slice(0, 10);
           let staTimestamp = generatedDate.concat('T', result.GetStationBoardResult.trainServices.service[i].sta);
 
-          let etaTimestamp;
+          let etaTimestampStr;
           if (result.GetStationBoardResult.trainServices.service[i].eta === 'On time') {
-            etaTimestamp = staTimestamp;
+            etaTimestampStr = (new Date(staTimestamp)).toISOString();
+          } else if (result.GetStationBoardResult.trainServices.service[i].eta === 'Cancelled') {
+            etaTimestampStr = result.GetStationBoardResult.trainServices.service[i].eta;
           } else {
-            etaTimestamp = generatedDate.concat('T', result.GetStationBoardResult.trainServices.service[i].eta);
+            etaTimestampStr = (new Date(generatedDate.concat('T', result.GetStationBoardResult.trainServices.service[i].eta))).toISOString();
           }
 
           let serviceDetails = {
             arrivalDetails: {
               crs: result.GetStationBoardResult.crs,
               fullName: result.GetStationBoardResult.locationName,
-              scheduledTimestamp: new Date(staTimestamp),
-              actualTimestamp: new Date(etaTimestamp)
+              scheduledTimestamp: (new Date(staTimestamp)).toISOString(),
+              actualTimestamp: etaTimestampStr
             },
-            trainId: result.GetStationBoardResult.trainServices.service[i].rsid,
+            trainId: result.GetStationBoardResult.trainServices.service[i].serviceID,
             delayDate: String(result.GetStationBoardResult.generatedAt).slice(0, 10),
           };
 
@@ -199,65 +172,16 @@ function monitorArrivals(fromStation, toStation) {
   });
 }
 
-//setInterval( () => { monitorArrivals('PTR', 'WAT'); monitorDepartures('PTR', 'WAT'); }, 60000 );
+setInterval( () => { monitorArrivals('PTR', 'WAT'); monitorDepartures('PTR', 'WAT'); }, 10000 );
+//setInterval( () => { monitorArrivals('PTR', 'WAT'); }, 10000 );
 
-function findDelay(delayDetails, callBack) {
+
+function findDelay(delayDetails) {
   console.log('findDelay');
 
   let dbQueryParams = {
-    ':scheduledTimestamp': delayDetails.departureDetails.scheduledTimestamp
-  };
-
-  let marshalledQueryParams = AWS.DynamoDB.Converter.marshall(dbQueryParams);
-
-  let paramsQuery = {
-    TableName: table,
-    ExpressionAttributeValues: marshalledQueryParams,
-    FilterExpression: 'departureDetails.scheduledTimestamp >= :scheduledTimestamp',
-    ProjectionExpression: 'arrivalDetails, departureDetails, delayInSeconds, trainId, delayDate'
-  };
-
-  let promiseQuery = dbClient.scan(paramsQuery).promise();
-
-  promiseQuery.then((data) => {
-    if (data.Count !== 0) {
-      callBack(data.Items);
-    } else {
-      console.log('Not found');
-      callBack({ ErrorMsg: 'Could not find it' });
-    }
-  }).catch((data) => {
-    console.log('Error findOne');
-    callBack({ ErrorMsg: 'Something bad happened' });
-  });
-};
-
-/*function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}*/
-
-function insertArrival(delayDetails, callBack) {
-  console.log('insertArrival');
-
-  let localDelayDetails = {
-    arrivalDetails: {
-      crs: delayDetails.arrivalDetails.crs,
-      fullName: delayDetails.arrivalDetails.fullName,
-      scheduledTimestamp: new Date( delayDetails.arrivalDetails.scheduledTimestamp ),
-      actualTimestamp: new Date( delayDetails.arrivalDetails.actualTimestamp )
-    },
-    trainId: delayDetails.trainId,
-    delayDate: delayDetails.delayDate,
-  };
-
-  let timeDiff = Math.abs(localDelayDetails.arrivalDetails.actualTimestamp.getTime() - localDelayDetails.arrivalDetails.scheduledTimestamp.getTime());
-  let diffSecs = Math.ceil(timeDiff / 1000);
-
-  localDelayDetails.delayInSeconds = diffSecs;
-
-  let dbQueryParams = {
     ':t': delayDetails.trainId,
-    ':d': 'localDelayDetails.delayDate',
+    ':d': delayDetails.delayDate,
   };
 
   let marshalledQueryParams = AWS.DynamoDB.Converter.marshall(dbQueryParams);
@@ -270,24 +194,102 @@ function insertArrival(delayDetails, callBack) {
   };
 
   let promiseQuery = dbClient.query(paramsQuery).promise();
-  promiseQuery.then((data) => {
-    let marshalledAddDelay = AWS.DynamoDB.Converter.marshall(localDelayDetails);
-    let paramsAdd = {
-      TableName: table,
-      Item: marshalledAddDelay
-    };
-
+  return promiseQuery.then((data) => {
     if (data.Count !== 0) {
+      console.log('Found: ', data);
+      return { found: true, dbData: processDBData(data)[0] };
+    } else {
+      console.log('Not found');
+      return { found: false, ErrorMsg: 'Could not find it' };
+    }
+  }).catch((err) => {
+    console.log('Error findOne');
+    return { found: false, ErrorMsg: err };
+  });
+};
+
+
+/*function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}*/
+
+function insertArrival(delayDetails, callBack) {
+  console.log('insertArrival');
+
+  let localDelayDetails = {
+    arrivalDetails: {
+      crs: delayDetails.arrivalDetails.crs,
+      fullName: delayDetails.arrivalDetails.fullName,
+      scheduledTimestamp: delayDetails.arrivalDetails.scheduledTimestamp,
+      actualTimestamp: delayDetails.arrivalDetails.actualTimestamp
+    },
+    trainId: delayDetails.trainId,
+    delayDate: delayDetails.delayDate,
+  };
+
+  if (localDelayDetails.arrivalDetails.actualTimestamp !== 'Cancelled') {
+    let timeDiff = Math.abs((new Date(localDelayDetails.arrivalDetails.actualTimestamp)).getTime() - (new Date(localDelayDetails.arrivalDetails.scheduledTimestamp)).getTime());
+    let diffSecs = Math.ceil(timeDiff / 1000);
+    localDelayDetails.delayInSeconds = diffSecs;
+  } else {
+    localDelayDetails.delayInSeconds = 'Cancelled';
+  }
+
+  let dbQueryParams = {
+    ':t': delayDetails.trainId,
+    ':d': localDelayDetails.delayDate,
+  };
+
+  let marshalledQueryParams = AWS.DynamoDB.Converter.marshall(dbQueryParams);
+
+  let paramsQuery = {
+    TableName: table,
+    ExpressionAttributeValues: marshalledQueryParams,
+    KeyConditionExpression: 'delayDate = :d and trainId = :t',
+    ProjectionExpression: 'arrivalDetails, trainId, delayDate'
+  };
+
+  let promiseQuery = dbClient.query(paramsQuery).promise();
+  promiseQuery.then((data) => {
+    if (data.Count === 0) {
+      let marshalledAddDelay = AWS.DynamoDB.Converter.marshall(localDelayDetails);
+      let paramsAdd = {
+        TableName: table,
+        Item: marshalledAddDelay
+      };
+
       let promiseAdd = dbClient.putItem(paramsAdd).promise();
       promiseAdd.then((data) => {
-        console.log('PutItem succeeded:', data);
+        console.log('PutItem succeeded');
       }).catch((err) => {
         console.error('Unable to putItem. Error JSON:', err);
       });
     } else {
-      let promiseAdd = dbClient.update(paramsAdd).promise();
-      promiseAdd.then((data) => {
-        console.log('Update succeeded:', data);
+      let updateParams = {
+        ':fullName': localDelayDetails.arrivalDetails.fullName,
+        ':crs': localDelayDetails.arrivalDetails.crs,
+        ':actualTimestamp': localDelayDetails.arrivalDetails.actualTimestamp,
+        ':delayInSeconds': localDelayDetails.delayInSeconds,
+        ':scheduledTimestamp': localDelayDetails.arrivalDetails.scheduledTimestamp
+      };
+      let marshalledUpdateDelay = AWS.DynamoDB.Converter.marshall(updateParams);
+
+      let key = {
+        delayDate: localDelayDetails.delayDate,
+        trainId: delayDetails.trainId
+      };
+      let marshalledUpdateKey = AWS.DynamoDB.Converter.marshall(key);
+      let paramsUpdate = {
+        TableName: table,
+        Key: marshalledUpdateKey,
+        UpdateExpression: 'set arrivalDetails.crs = :crs, arrivalDetails.fullName = :fullName, arrivalDetails.scheduledTimestamp = :scheduledTimestamp, arrivalDetails.actualTimestamp = :actualTimestamp, delayInSeconds = :delayInSeconds',
+        ExpressionAttributeValues: marshalledUpdateDelay,
+        ReturnValues: 'UPDATED_NEW'
+      };
+
+      let promiseUpdate = dbClient.updateItem(paramsUpdate).promise();
+      promiseUpdate.then((data) => {
+        console.log('Update succeeded');
       }).catch((err) => {
         console.error('Unable to putItem. Error JSON:', err);
       });
@@ -297,25 +299,24 @@ function insertArrival(delayDetails, callBack) {
   });
 }
 
-
 function insertDelay(delayDetails) {
   console.log('insertDelay');
-
   let localDelayDetails = {
     departureDetails: {
       crs: delayDetails.departureDetails.crs,
       fullName: delayDetails.departureDetails.fullName,
-      scheduledTimestamp: new Date(delayDetails.departureDetails.scheduledTimestamp),
-      actualTimestamp: new Date(delayDetails.departureDetails.actualTimestamp)
+      scheduledTimestamp: delayDetails.departureDetails.scheduledTimestamp,
+      actualTimestamp: delayDetails.departureDetails.actualTimestamp
     },
     arrivalDetails: {
       crs: delayDetails.arrivalDetails.crs,
       fullName: delayDetails.arrivalDetails.fullName,
-      scheduledTimestamp: new Date(delayDetails.arrivalDetails.scheduledTimestamp),
-      actualTimestamp: new Date(delayDetails.arrivalDetails.actualTimestamp)
+      scheduledTimestamp: delayDetails.arrivalDetails.scheduledTimestamp,
+      actualTimestamp: delayDetails.arrivalDetails.actualTimestamp
     },
     trainId: delayDetails.trainId,
     delayDate: delayDetails.delayDate,
+    delayInSeconds: delayDetails.delayInSeconds
   };
 
   let dbQueryParams = {
@@ -337,35 +338,61 @@ function insertDelay(delayDetails) {
   return promiseQuery.then((data) => {
     let marshalledAddDelay = AWS.DynamoDB.Converter.marshall(localDelayDetails);
     let paramsAdd = {
-      TableName: 'delays',
-      Item: marshalledAddDelay
+      TableName: table,
+      Item: marshalledAddDelay,
     };
 
-    console.log('paramsAdd: ', paramsAdd);
-    console.log('data.Count: ', data.Count);
     if (data.Count === 0) {
       let promiseAdd = dbClient.putItem(paramsAdd).promise();
       return promiseAdd.then((data) => {
-        console.log('PutItem succeeded:', data);
-        return 201;
+        console.log('PutItem succeeded:');
+        return { code: 201 };
       }).catch((err) => {
         console.error('Unable to putItem. Error JSON:', err);
-        return 500;
+        return { code: 500, dbData: err };
       });
     } else {
-      // NEED to add in key for the update
-      let promiseUpdate = dbClient.updateItem(paramsAdd).promise();
+      let updateParams = {
+        ':arrivalFullName': localDelayDetails.arrivalDetails.fullName,
+        ':arrivalCrs': localDelayDetails.arrivalDetails.crs,
+        ':arrivalActualTimestamp': localDelayDetails.arrivalDetails.actualTimestamp,
+        ':arrivalScheduledTimestamp': localDelayDetails.arrivalDetails.scheduledTimestamp,
+        ':departureFullName': localDelayDetails.departureDetails.fullName,
+        ':departureCrs': localDelayDetails.departureDetails.crs,
+        ':departureActualTimestamp': localDelayDetails.departureDetails.actualTimestamp,
+        ':departureScheduledTimestamp': localDelayDetails.departureDetails.scheduledTimestamp,
+        ':delayInSeconds': localDelayDetails.delayInSeconds
+      };
+      let marshalledUpdateDelay = AWS.DynamoDB.Converter.marshall(updateParams);
+
+      let key = {
+        delayDate: localDelayDetails.delayDate,
+        trainId: delayDetails.trainId
+      };
+      let marshalledUpdateKey = AWS.DynamoDB.Converter.marshall(key);
+      let paramsUpdate = {
+        TableName: table,
+        Key: marshalledUpdateKey,
+        UpdateExpression: 'set arrivalDetails.crs = :arrivalCrs, arrivalDetails.fullName = :arrivalFullName, arrivalDetails.scheduledTimestamp = :arrivalScheduledTimestamp, arrivalDetails.actualTimestamp = :arrivalActualTimestamp, departureDetails.crs = :departureCrs, departureDetails.fullName = :departureFullName, departureDetails.scheduledTimestamp = :departureScheduledTimestamp, departureDetails.actualTimestamp = :departureActualTimestamp, delayInSeconds = :delayInSeconds',
+        ExpressionAttributeValues: marshalledUpdateDelay,
+        ReturnValues: 'UPDATED_NEW'
+      };
+
+      let promiseUpdate = dbClient.updateItem(paramsUpdate).promise();
       return promiseUpdate.then((data) => {
-        console.log('Update succeeded:', data);
-        return 200;
+        console.log('Update succeeded');
+        let dbData = AWS.DynamoDB.Converter.unmarshall(data.Attributes);
+        dbData.delayDate = localDelayDetails.delayDate;
+        dbData.trainId = delayDetails.trainId;
+        return { code: 200, dbData };
       }).catch((err) => {
         console.error('Unable to update. Error JSON:', err);
-        return 500;
+        return { code: 500, dbError: err };
       });
     }
   }).catch((err) => {
     console.error('Unable to read item. Error JSON:', err);
-    return 500;
+    return { code: 500, dbError: err };
   });
 };
 
@@ -376,8 +403,8 @@ function insertDeparture(delayDetails) {
     departureDetails: {
       crs: delayDetails.departureDetails.crs,
       fullName: delayDetails.departureDetails.fullName,
-      scheduledTimestamp: new Date(delayDetails.departureDetails.scheduledTimestamp),
-      actualTimestamp: new Date(delayDetails.departureDetails.actualTimestamp)
+      scheduledTimestamp: delayDetails.departureDetails.scheduledTimestamp,
+      actualTimestamp: delayDetails.departureDetails.actualTimestamp
     },
     trainId: delayDetails.trainId,
     delayDate: delayDetails.delayDate,
@@ -385,7 +412,7 @@ function insertDeparture(delayDetails) {
 
   let dbQueryParams = {
     ':t': delayDetails.trainId,
-    ':d': 'localDelayDetails.delayDate',
+    ':d': localDelayDetails.delayDate,
   };
 
   let marshalledQueryParams = AWS.DynamoDB.Converter.marshall(dbQueryParams);
@@ -401,21 +428,42 @@ function insertDeparture(delayDetails) {
   promiseQuery.then((data) => {
     let marshalledAddDelay = AWS.DynamoDB.Converter.marshall(localDelayDetails);
     let paramsAdd = {
-      TableName: 'delays',
+      TableName: table,
       Item: marshalledAddDelay
     };
 
-    if (data.Count !== 0) {
+    if (data.Count === 0) {
       let promiseAdd = dbClient.putItem(paramsAdd).promise();
-      promiseAdd.then((err, data) => {
-        console.log('PutItem succeeded:', data);
+      promiseAdd.then((data) => {
+        console.log('PutItem succeeded:');
       }).catch((err) => {
         console.error('Unable to putItem. Error JSON:', err);
       });
     } else {
-      let promiseAdd = dbClient.update(paramsAdd).promise();
-      promiseAdd.then((err, data) => {
-        console.log('Update succeeded:', data);
+      let updateParams = {
+        ':fullName': localDelayDetails.departureDetails.fullName,
+        ':crs': localDelayDetails.departureDetails.crs,
+        ':actualTimestamp': localDelayDetails.departureDetails.actualTimestamp,
+        ':scheduledTimestamp': localDelayDetails.departureDetails.scheduledTimestamp
+      };
+      let marshalledUpdateDelay = AWS.DynamoDB.Converter.marshall(updateParams);
+
+      let key = {
+        delayDate: localDelayDetails.delayDate,
+        trainId: delayDetails.trainId
+      };
+      let marshalledUpdateKey = AWS.DynamoDB.Converter.marshall(key);
+      let paramsUpdate = {
+        TableName: table,
+        Key: marshalledUpdateKey,
+        UpdateExpression: 'set departureDetails.crs = :crs, departureDetails.fullName = :fullName, departureDetails.scheduledTimestamp = :scheduledTimestamp, departureDetails.actualTimestamp = :actualTimestamp',
+        ExpressionAttributeValues: marshalledUpdateDelay,
+        ReturnValues: 'UPDATED_NEW'
+      };
+
+      let promiseUpdate = dbClient.updateItem(paramsUpdate).promise();
+      promiseUpdate.then((data) => {
+        console.log('Update succeeded');
       }).catch((err) => {
         console.error('Unable to update. Error JSON:', err);
       });
@@ -478,15 +526,23 @@ app.post('/delays', (req, res) => {
   } else {
     insertDelay(req.body).then((insertResult) => {
       console.log('insertResult: ', insertResult);
-      if (insertResult === 201) {
+      if (insertResult.code === 201) {
         console.log('Returning 201');
-        findDelay(req.body, (findResult) => {res.status(201).json(findResult); });
-      } else if (insertResult === 200) {
+        findDelay(req.body).then((findResult) => {
+          if (findResult.found === true) {
+            res.status(201).json(findResult.dbData);
+          } else {
+            res.status(500).json(findResult.ErrorMsg);
+          };
+        }).catch((err) => {
+          res.status(500).json({ ErrorMsg: 'Something bad happend', dbError: err });
+        });
+      } else if (insertResult.code === 200) {
         console.log('Returning 200');
-        res.status(200).json({ Msg: 'Already present in DB, updated.' });
+        res.status(200).json({ Msg: 'Already present in DB, updated.', dbEntry: insertResult.dbData });
       } else {
         console.log('Returning 500');
-        res.status(500).json({ ErrorMsg: 'Something bad happend' });
+        res.status(500).json({ ErrorMsg: 'Something bad happend', dbError: insertResult.dbError });
       }
     });
   }
@@ -612,6 +668,8 @@ app.get('/delays/:fromDate', (req, res) => {
     ':toTimestamp': toDate.toISOString()
   };
 
+  console.log(dbQueryParams);
+
   if (req.query.delayed !== undefined) {
     dbQueryParams[':s'] = '0';
 
@@ -668,6 +726,8 @@ app.get('/delays/:fromDate/:toDate', (req, res) => {
     ':fromTimestamp': fromDate.toISOString(),
     ':toTimestamp': toDate.toISOString()
   };
+
+  console.log(dbQueryParams);
 
   if (req.query.delayed !== undefined) {
     dbQueryParams[':s'] = '0';
@@ -730,7 +790,36 @@ app.get('/trains/:from/:to', (req, res) => {
   res.status(200).json( {} );
 });
 
-app.listen(port, () => {
-  console.log('listening on ', port);
+/**************************************************************************/
+AWS.config.update({
+  region: 'eu-west-2',
+  endpoint: 'http://localhost:8000'
 });
 
+
+//AWS.config.loadFromPath('./src/config.json');
+
+let dbClient = new AWS.DynamoDB();
+
+let paramsQuery = {
+  TableName: table,
+};
+
+let port = process.env.PORT || 3000;
+
+console.log('Trying to connect to the table');
+
+dbClient.describeTable(paramsQuery, (err, data) => {
+  if (err) {
+    console.log('Can\'t connect to the DynamoDB table.');
+    console.log(err, err.stack); // an error occurred
+    process.exit(1);
+  } else {
+    console.log('Connected to the DynamoDB instance');
+    console.log(data);
+    console.log(data.Table.KeySchema);
+    app.listen(port, () => {
+      console.log('listening on ', port);
+    });
+  }
+});

@@ -15,7 +15,9 @@ Then install the local dependencies
 $ npm install
 ```
 
-Requires a local mongodb instance up and running on port 27017 with a "delaydb" table.
+Requires a local dynamoDB instance up and running on port 8000 with a "delays" table. Local version run using ddb - defined in bash profile:
+
+alias ddb="cd ~/Personal/AWS/Externals/dynamodb_local_latest && java -Djava.library.path=./DynamoDBLocal_lib -jar DynamoDBLocal.jar -sharedDb"
 
 ## Dev build + livereload webserver
 ```bash
