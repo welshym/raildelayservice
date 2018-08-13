@@ -2,7 +2,7 @@
   "name": "db",
   "version": "1.0.0",
   "description": "DB app",
-  "entry": "./src/nationalrail_delay.js",
+  "entry": "./src/nationalraildelay.js",
   "output": "./build/main.js",
   "scripts": {
     "start": "npm run build && node ./build/main.js",
