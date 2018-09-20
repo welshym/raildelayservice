@@ -4,6 +4,8 @@ import bodyParser from 'body-parser';
 const app = express();
 const Joi = require('joi');
 
+const MAXLENGTH = 10;
+
 let AWS = require('aws-sdk');
 let table = 'delays';
 
@@ -31,34 +33,6 @@ const DelaySchema = Joi.object({
   delayInSeconds: Joi.number().integer().positive().required(),
   delayDate: Joi.string().min(2).max(20).required()
 });
-
-/*let sampleDelay = {
-  departureDetails: {
-    crs: 'PTR',
-    fullName: 'Petersfield',
-    scheduledTimestamp: '2018-03-02T06:48:00.000Z',
-    actualTimestamp: '2018-03-02T06:59:00.000Z'
-  },
-  arrivalDetails: {
-    crs: 'WAT',
-    fullName: 'Waterloo',
-    scheduledTimestamp: '2018-03-02T07:54:00.000Z',
-    actualTimestamp: '2018-03-02T08:59:00.000Z'
-  },
-  trainId: 'SW815900',
-  delayInSeconds: '65',
-  delayDate: '2018-02-03',
-};*/
-/*
-MongoClient.connect(url, (err, db) => {
-  if (err) throw err;
-  database = db.db('delaydb');
-  database.createCollection('delays', (err, res) => {
-    if (err) throw err;
-    console.log('Collection created!');
-  });
-});
-*/
 
 function findDelay(delayDetails) {
   console.log('findDelay');
@@ -298,7 +272,6 @@ app.delete('/delays/:delayDate/:trainId', (req, res) => {
   //  let marshalledQueryParams = AWS.DynamoDB.Converter.marshall(dbQueryParams);
   //  paramsQuery.Key = marshalledQueryParams;
   //  let promiseQuery = dbClient.deleteItem(paramsQuery).promise();
-  console.log(dbQueryParams);
   let marshalledQueryParams = AWS.DynamoDB.Converter.marshall(dbQueryParams);
   paramsQuery.Key = marshalledQueryParams;
   console.log(paramsQuery);
@@ -341,6 +314,91 @@ app.delete('/delays', (req, res) => {
 });
 
 
+function processDBData(data) {
+  let result = [];
+  for (let i = 0, len = data.Items.length; i < len; i++) {
+    result.push(AWS.DynamoDB.Converter.unmarshall(data.Items[i]));
+  }
+  return result;
+};
+
+
+function scanDB (pageSize, pageNumber, processedCount, paramsQuery, respData) {
+  let startingPoint = pageNumber * pageSize;
+  return new Promise((resolve, reject) => {
+    let promiseQuery = dbClient.scan(paramsQuery).promise();
+    promiseQuery.then((scanData) => {
+      if (((scanData.Count + processedCount) > startingPoint) && (respData.length !== pageSize)) {
+        let startProc = 0;
+        if (startingPoint > processedCount) {
+          startProc = startingPoint - processedCount;
+        }
+
+        let endProc = scanData.Count;
+        if ((endProc - startProc + respData.length) > pageSize) {
+          endProc = startProc + pageSize - respData.length;
+        }
+
+        for (let i = startProc; i < endProc; i++) {
+          console.log(AWS.DynamoDB.Converter.unmarshall(scanData.Items[i]));
+          respData.push(AWS.DynamoDB.Converter.unmarshall(scanData.Items[i]));
+        }
+      }
+
+      if (scanData.LastEvaluatedKey === undefined) {
+        console.log('No more data');
+        resolve({ pageSize, pageNumber, totalPages: Math.ceil((processedCount + scanData.Count) / pageSize), delays: respData });
+      } else {
+        console.log('Scanning again');
+        paramsQuery.ExclusiveStartKey = scanData.LastEvaluatedKey;
+        resolve(scanDB(pageSize, pageNumber, processedCount + scanData.Count, paramsQuery, respData));
+      }
+    }).catch((err) => {
+      console.log('Error from scan promise: ', err);
+      return reject();
+    });
+  });
+}
+
+
+function factoryGetDBData (req, res, paramsQuery, dbQueryParams) {
+  if (req.query.delayed !== undefined) {
+    dbQueryParams[':delayed'] = '0';
+    if (paramsQuery.FilterExpression === undefined) {
+      paramsQuery.FilterExpression = '';
+    }
+
+    if (req.query.delayed.trim() === 'true') {
+      paramsQuery.FilterExpression += 'and delayInSeconds > :delayed';
+    } else {
+      paramsQuery.FilterExpression += 'and delayInSeconds = :delayed';
+    }
+
+    let marshalledQueryParams = AWS.DynamoDB.Converter.marshall(dbQueryParams);
+    paramsQuery.ExpressionAttributeValues = marshalledQueryParams;
+  }
+
+  let pageNumber = 0;
+  if ((req.query.pageNumber !== undefined) && (req.query.pageNumber > 0)) {
+    pageNumber = Number(req.query.pageNumber);
+  }
+
+  let pageSize = Number(req.query.pageSize);
+  if ((req.query.pageSize === undefined) || (pageSize > MAXLENGTH) || (pageSize <= 0)) {
+    pageSize = MAXLENGTH;
+  }
+  let data = [];
+  let scanDBPromise = scanDB(pageSize, pageNumber, 0, paramsQuery, data);
+
+  scanDBPromise.then((data) => {
+    console.log('factoryGetDBData: Success');
+    res.status(200).json(data);
+  }).catch((err) => {
+    console.log('Error: ', err);
+    res.status(404).json({ ErrorMsg: 'Something bad happened' });
+  });
+}
+
 app.get('/delays', (req, res) => {
   console.log('GET: /delays');
 
@@ -348,32 +406,8 @@ app.get('/delays', (req, res) => {
     TableName: table
   };
 
-  if (req.query.delayed !== undefined) {
-    let dbQueryParams = {
-      ':s': '0',
-    };
-    let marshalledQueryParams = AWS.DynamoDB.Converter.marshall(dbQueryParams);
-    paramsQuery.ExpressionAttributeValues = marshalledQueryParams;
-
-    if (req.query.delayed.trim() === 'true') {
-      paramsQuery.FilterExpression = 'delayInSeconds > :s';
-    } else {
-      paramsQuery.FilterExpression = 'delayInSeconds = :s';
-    }
-  }
-
-  let promiseQuery = dbClient.scan(paramsQuery).promise();
-
-  console.log('query string: ', req.query.delayed);
-  console.log('app.get /delays params: ', paramsQuery);
-  promiseQuery.then((data) => {
-    console.log('GET: Success');
-    console.log('GET: ', data);
-    res.status(200).json(processDBData(data));
-  }).catch((err) => {
-    console.log('Error: ', err);
-    res.status(404).json({ ErrorMsg: 'Something bad happened' });
-  });
+  let dbQueryParams = {};
+  factoryGetDBData(req, res, paramsQuery, dbQueryParams);
 });
 
 app.get('/delays/:fromDate', (req, res) => {
@@ -396,43 +430,10 @@ app.get('/delays/:fromDate', (req, res) => {
   };
 
   console.log(dbQueryParams);
-
-  if (req.query.delayed !== undefined) {
-    dbQueryParams[':s'] = '0';
-
-    if (req.query.delayed.trim() === 'true') {
-      paramsQuery.FilterExpression = 'departureDetails.scheduledTimestamp > :fromTimestamp and departureDetails.scheduledTimestamp <= :toTimestamp and delayInSeconds > :s';
-    } else {
-      paramsQuery.FilterExpression = 'departureDetails.scheduledTimestamp > :fromTimestamp and departureDetails.scheduledTimestamp <= :toTimestamp and delayInSeconds = :s';
-    }
-  } else {
-    paramsQuery.FilterExpression = 'departureDetails.scheduledTimestamp > :fromTimestamp and departureDetails.scheduledTimestamp <= :toTimestamp';
-  }
-
-  let marshalledQueryParams = AWS.DynamoDB.Converter.marshall(dbQueryParams);
-  paramsQuery.ExpressionAttributeValues = marshalledQueryParams;
-
-  console.log('app.get: ', paramsQuery);
-
-  let promiseQuery = dbClient.scan(paramsQuery).promise();
-
-  promiseQuery.then((data) => {
-    console.log('GET: Success');
-    console.log('GET: ', data.Items);
-    res.status(200).json(processDBData(data));
-  }).catch((err) => {
-    console.log('Error: ', err);
-    res.status(404).json({ ErrorMsg: 'Something bad happened' });
-  });
+  paramsQuery.FilterExpression = 'departureDetails.scheduledTimestamp > :fromTimestamp and departureDetails.scheduledTimestamp <= :toTimestamp';
+  factoryGetDBData(req, res, paramsQuery, dbQueryParams);
 });
 
-function processDBData(data) {
-  let result = [];
-  for (let i = 0, len = data.Items.length; i < len; i++) {
-    result.push(AWS.DynamoDB.Converter.unmarshall(data.Items[i]));
-  }
-  return result;
-}
 
 app.get('/delays/:fromDate/:toDate', (req, res) => {
   console.log('GET fromDate toDate request');
@@ -455,45 +456,21 @@ app.get('/delays/:fromDate/:toDate', (req, res) => {
   };
 
   console.log(dbQueryParams);
-
-  if (req.query.delayed !== undefined) {
-    dbQueryParams[':s'] = '0';
-
-    if (req.query.delayed === true) {
-      paramsQuery.FilterExpression = 'departureDetails.scheduledTimestamp > :fromTimestamp and departureDetails.scheduledTimestamp <= :toTimestamp and delayInSeconds > :s';
-    } else {
-      paramsQuery.FilterExpression = 'departureDetails.scheduledTimestamp > :fromTimestamp and departureDetails.scheduledTimestamp <= :toTimestamp and delayInSeconds = :s';
-    }
-  } else {
-    paramsQuery.FilterExpression = 'departureDetails.scheduledTimestamp > :fromTimestamp and departureDetails.scheduledTimestamp <= :toTimestamp';
-  }
-
-  let marshalledQueryParams = AWS.DynamoDB.Converter.marshall(dbQueryParams);
-  paramsQuery.ExpressionAttributeValues = marshalledQueryParams;
   paramsQuery.FilterExpression = 'departureDetails.scheduledTimestamp > :fromTimestamp and departureDetails.scheduledTimestamp <= :toTimestamp';
-
-  let promiseQuery = dbClient.scan(paramsQuery).promise();
-
-  promiseQuery.then((data) => {
-    console.log('GET: Success');
-    res.status(200).json(processDBData(data));
-  }).catch((err) => {
-    console.log('Error: ', err);
-    res.status(404).json({ ErrorMsg: 'Something bad happened' });
-  });
+  factoryGetDBData(req, res, paramsQuery, dbQueryParams);
 });
 
 
 /**************************************************************************/
-/*AWS.config.update({
+// Cloud
+//var credentials = new AWS.SharedIniFileCredentials({ profile: 'default' });
+//AWS.config.update({ region: 'us-east-1', credentials });
+
+// Local
+AWS.config.update({
   region: 'eu-west-2',
   endpoint: 'http://localhost:8000'
-});*/
-
-//AWS.config.loadFromPath('./src/config.json');
-let credentials = new AWS.SharedIniFileCredentials({ profile: 'default' });
-//AWS.config.credentials = credentials;
-AWS.config.update({ region: 'us-east-1', credentials });
+});
 
 let dbClient = new AWS.DynamoDB();
 
